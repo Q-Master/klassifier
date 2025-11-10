@@ -487,13 +487,31 @@ macro super*(classname, body: untyped): untyped =
   if body.kind != nnkCall:
     error "Only callable could be used in a super"
   if classCache.hasKey(cn) and classCache[cn].basename != "":
-    let fn = $body[0]
+    let fn: string = (
+      if body[0].kind == nnkIdent:
+        $body[0]
+      elif body[0].kind == nnkDotExpr:
+        $body[0][1]
+      else:
+        error "Unknown call"
+    )
     let mc = findMethodClass(fn, classCache[cn].basename)
     if mc.len > 0:
       var allparams: seq[NimNode]
       for param in body:
         allparams.add(param)
-      allparams[0] = ident mc.toLower() & fn & "Impl"
+      if body[0].kind == nnkIdent:
+        allparams[0] = ident mc.toLower() & fn & "Impl"
+        allparams[1] = nnkCast.newTree(
+          ident mc,
+          allparams[1].copy
+        )
+      else:
+        allparams[0][0] = nnkCast.newTree(
+          ident mc,
+          allparams[0][0].copy
+        )
+        allparams[0][1] = ident mc.toLower() & fn & "Impl"
       result = nnkCall.newTree()
       for param in allparams:
         result.add(param)
