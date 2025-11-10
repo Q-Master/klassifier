@@ -33,8 +33,9 @@ This macro is used to create the class type with all needed initializations. The
  - proc for just a simple proc.
 
 Methods are checked to contain the first param of the type of current class otherwise they're added as a simple proc.
-Methods which pass all the checks are marked as a virtual and added to vtable (very simple implementation).
-
+Methods which pass all the checks are marked as a virtual and added to vtable (very simple implementation).  
+The `=destroy` method marks destructor and correctly supported by class code generator.  
+The `=new` method marks constructor. The resulting code will be modified to correctly initialize VT of the class.
 
 ### The *super* macro
 
