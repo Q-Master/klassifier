@@ -146,13 +146,13 @@ proc getAllParamNames(params: NimNode): seq[NimNode] {.compiletime.} =
     if pd.kind == nnkIdentDefs:
       for id in pd.children:
         if pident.kind == nnkEmpty:
-          pident = id.copy
+          pident = id
         else:
           if id.kind == nnkEmpty:
             break
           else:
             result.add(pident)
-            pident = id.copy
+            pident = id
 
 
 proc addProcNode(methods: var NimNode, classname: string, basename: string, virtualMethod: NimNode, varlist: var NimNode): seq[NimNode] {.compiletime.} =
@@ -269,54 +269,67 @@ proc createDestroyMethod(classname: string, destroyMethod: NimNode): NimNode {.c
 
 
 proc createCreateMethod(classname: string, createMethod: NimNode = nil): NimNode {.compiletime.} =
-  result = nnkProcDef.newTree(
+  result = nnkStmtList.newTree()
+  let newProc = nnkProcDef.newTree(
     nnkPostfix.newTree(
       ident "*",
-      ident "new"
+      ident "new" & classname
     ),
     newEmptyNode(),
     newEmptyNode(),
     nnkFormalParams.newTree(
       ident classname,
-      nnkIdentDefs.newTree(
-        ident "_",
-        nnkBracketExpr.newTree(
-          ident "type",
-          ident classname,
-        ),
-        newEmptyNode(),
-      )
     ),
     newEmptyNode(),
     newEmptyNode(),
     nnkStmtList.newTree(
-      nnkDotExpr.newTree(
-        ident "result",
-        ident "new"
-      ),
-      nnkCall.newTree(
-        nnkDotExpr.newTree(
-          ident "result",
-          ident "init"
-        )
-      )
+      newCall("new", ident "result"),
+      newCall("initVT", ident "result")
     )
   )
   if not createMethod.isNil:
     let methFormalParams = createMethod[3].copy()
-    methFormalParams.del(0, 2)
+    methFormalParams.del(0, 1)
+    let initProc = nnkProcDef.newTree(
+      nnkPostfix.newTree(
+        ident "*",
+        ident "init"
+      ),
+      newEmptyNode(),
+      newEmptyNode(),
+      nnkFormalParams.newTree(
+        newEmptyNode(),
+        nnkIdentDefs.newTree(
+          ident "self",
+          ident classname,
+          newEmptyNode()
+        )
+      ),
+      newEmptyNode(),
+      newEmptyNode(),
+      nnkStmtList.newTree()
+    )
+    createMethod[6].copyChildrenTo(initProc[6])
+
     for fp in methFormalParams.children:
-      result[3].add(fp)
-    for st in createMethod[6].children:
-      result[6].add(st)
-    result.setLineInfo(createMethod.lineInfoObj)
+      newProc[3].add(fp.copy)
+      initProc[3].add(fp.copy)
+    var params = getAllParamNames(methFormalParams)
+    params.insert(ident "result", 0)
+    let initCall = newCall("init", params)
+    newProc[6].add(initCall)
+    newProc.setLineInfo(createMethod.lineInfoObj)
+    initProc.setLineInfo(createMethod.lineInfoObj)
+    result.add(initProc)
+  result.add(newProc)
+  echo result.treeRepr
 
 
-proc createInit(classname: string, initlines: NimNode): NimNode {.compiletime.} =
+proc createInitVTable(classname: string, initlines: NimNode): NimNode {.compiletime.} =
   result = nnkProcDef.newTree(
     nnkPostfix.newTree(
       ident "*",
-      ident "init"
+      ident "initVT"
     ),
     newEmptyNode(),
     newEmptyNode(),
@@ -342,8 +355,7 @@ proc createType(classname: string, basename: string, body: NimNode): (NimNode, N
   var constructor: NimNode = nil
   if basename.len > 0:
     initLines.add(
-      nnkCall.newTree(
-        ident "init",
+      newCall("initVT",
         nnkCast.newTree(
           ident basename,
           ident "self"
@@ -458,7 +470,7 @@ proc createType(classname: string, basename: string, body: NimNode): (NimNode, N
     initLines.add(
       nnkDiscardStmt.newTree(newEmptyNode())
     )
-  methods.add(createInit(classname, initLines))
+  methods.add(createInitVTable(classname, initLines))
   if constructor.isNil:
     methods.add(createCreateMethod(classname, nil))
   else:
@@ -477,7 +489,7 @@ macro class*(head, body: untyped): untyped =
   typeNode.setLineInfo(head.lineInfoObj)
   result.add(typeNode)
   result.add(methods)
-  #echo result.repr
+  echo result.repr
 
 
 macro super*(classname, body: untyped): untyped =

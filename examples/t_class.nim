@@ -1,5 +1,6 @@
 import ../klassifier
 
+
 class TClass:
   var x: int
   var x1*: int
@@ -14,21 +15,26 @@ class TClass:
   method tMethod2(self: TClass) = discard
   proc tProc(self: TClass) = discard
   proc tProc1*(self: TClass) = discard
+  method `=new`*(x: int) = echo $x
 
 
 class TClass1 of TClass:
   method tMethod(self: TClass1) = echo "TCLASS1 tmethod"
   method tMethod3(self: TClass1) = discard
   method `=destroy`*(self: TClass1) = echo "DESTRUCTION"
-  method `=new`*(self: TClass1) = echo "CONSTRUCTION"
+  method `=new`*() =
+    echo "CONSTRUCTION"
+    #echo x
+    cast[TClass](self).init(8)
 
 
 proc x(self: TClass1) =
   TClass1.super tMethod(self)
 
-let cls = TClass1.new()
+let cls = newTClass1()
 
 cls.tMethod()
 TClass1.super tMethod(cls)
 TClass1.super cls.tMethod()
+cast[TClass](cls).init(8)
 cls.x()
