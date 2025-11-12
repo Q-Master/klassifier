@@ -1,4 +1,4 @@
-import std/[macros, tables, strutils]
+import std/[macros, tables, strutils, sequtils]
 
 export macros
 
@@ -107,21 +107,32 @@ proc addVarNode(reclist: var NimNode, elem: NimNode) {.compiletime.} =
   reclist.add(typeNode)
 
 
-proc renameProc(elem: var NimNode, newName: string) =
-  case elem[0].kind
-  of nnkIdent:
-    elem[0] = newName.ident
-  of nnkPostfix:
-    elem[0][1] = newName.ident
-  else:
-    raise newException(ValueError, "Unknown method")
+proc renameProc(elem: NimNode, newName: string): NimNode {.compiletime.} =
+  result =
+    case elem[0].kind
+    of nnkIdent:
+      ident newName
+    of nnkPostfix:
+      nnkPostfix.newTree(
+        ident "*",
+        ident newName
+      )
+    else:
+      raise newException(ValueError, "Unknown method")
 
 
-proc convMethodToProc(elem: NimNode, newName: string = ""): NimNode =
-  result = nnkProcDef.newTree()
-  elem.copyChildrenTo(result)
-  if newName.len > 0:
-    renameProc(result, newName)
+proc convMethodToProc(elem: NimNode, newName: string = ""): NimNode {.compiletime.} =
+  result = newProc(
+    (
+      if newName.len > 0:
+        elem.renameProc(newName)
+      else:
+        elem[0].copy
+    ),
+    elem[3].children.toSeq,
+    body = elem[6].copy,
+    pragmas = elem[4].copy
+  )
 
 
 proc createProcVar(name: string, params: NimNode): NimNode {.compiletime.} =
@@ -141,21 +152,13 @@ proc createProcVar(name: string, params: NimNode): NimNode {.compiletime.} =
 
 
 proc getAllParamNames(params: NimNode): seq[NimNode] {.compiletime.} =
-  var pident: NimNode = newEmptyNode()
   for pd in params.children:
     if pd.kind == nnkIdentDefs:
-      for id in pd.children:
-        if pident.kind == nnkEmpty:
-          pident = id
-        else:
-          if id.kind == nnkEmpty:
-            break
-          else:
-            result.add(pident)
-            pident = id
+      for i in 0 ..< pd.len-2:
+        result.add(pd[i])
 
 
-proc addProcNode(methods: var NimNode, classname: string, basename: string, virtualMethod: NimNode, varlist: var NimNode): seq[NimNode] {.compiletime.} =
+proc addProcNode(methods: var seq[NimNode], classname: string, basename: string, virtualMethod: NimNode, varlist: var NimNode): seq[NimNode] {.compiletime.} =
   let methodName = (if virtualMethod[0].kind == nnkIdent: $virtualMethod[0] else: $virtualMethod[0][1])
   let methodNameV = methodName & "V"
   let methodNameImpl = classname.toLower & methodName & "Impl"
@@ -175,88 +178,62 @@ proc addProcNode(methods: var NimNode, classname: string, basename: string, virt
         ident methodNameImpl
       )
     )
+    var realCall: NimNode
+    var realProc: NimNode
+    var copiedElem: NimNode
 
     if mc.len == 0:
       classCache[classname].allVMethods.add(methodName)
+      #       - add proc with original name which calls the virtual method
+      realCall = newCall(nnkDotExpr.newTree(ident "self", ident methodNameV), getAllParamNames(virtualMethod[3]))
+      realProc = newProc(
+        virtualMethod[0].copy,
+        virtualMethod[3].children.toSeq,
+        body = newStmtList(
+          if virtualMethod[3][0].kind == nnkEmpty:
+            realCall
+          else:
+            newAssignment(
+              ident "result",
+              realCall
+            )
+        ),
+        pragmas = virtualMethod[4].copy
+      )
+      methods.add(realProc)
       #       - rename the original method to **Impl and add it. set the lineInfoObj to it
-      let copiedElem = convMethodToProc(virtualMethod, methodNameImpl)
+      copiedElem = convMethodToProc(virtualMethod, methodNameImpl)
       copiedElem.setLineInfo(virtualMethod.lineInfoObj)
       methods.add(copiedElem)
       #       - add type public variable with **V name and type proc (self: ClassType, ....) {.nimcall.}
       varlist.add(createProcVar(methodNameV, copiedElem[3].copy))
-      #       - add proc with original name which calls the virtual method
-      var realProc = convMethodToProc(virtualMethod)
-      methods.add(realProc)
-      if realProc[3][0].kind == nnkEmpty:
-        realProc[6] = nnkStmtList.newTree(
-          nnkCall.newTree(
-            nnkDotExpr.newTree(
-              ident "self",
-              ident methodNameV
-            )
-          )
-        )
-        for pid in getAllParamNames(copiedElem[3]):
-          realproc[6][0].add(pid)
-      else:
-        realProc[6] = nnkStmtList.newTree(
-          nnkAsgn.newTree(
-            ident "result",
-            nnkCall.newTree(
-              nnkDotExpr.newTree(
-                ident "self",
-                ident methodNameV
-              )
-            )
-          )
-        )
-        for pid in getAllParamNames(copiedElem[3]):
-          realproc[6][0][1].add(pid)
     else:
       #     - otherway
       #       - rename the original method to **ImplC and add it. set the lineInfoObj to it
-      let copiedElem = convMethodToProc(virtualMethod, methodNameImplC)
+      copiedElem = convMethodToProc(virtualMethod, methodNameImplC)
       copiedElem.setLineInfo(virtualMethod.lineInfoObj)
       methods.add(copiedElem)
       #       - create proc with type conversions from found base to current type, name it as **Impl
-      let realProc = convMethodToProc(virtualMethod, methodNameImpl)
-      realProc[3][1] = nnkIdentDefs.newTree(
-        ident "s",
-        ident mc,
-        newEmptyNode()
+      var realCallParams = getAllParamNames(virtualMethod[3])
+      realCallParams[0] = nnkCast.newTree(ident classname, ident "s")
+      realCall = newCall(methodNameImplC, realCallParams)
+      var realProcParams = virtualMethod[3].children.toSeq
+      realProcParams[1] = nnkIdentDefs.newTree(ident "s", ident mc, newEmptyNode())
+      realProc = newProc(
+        virtualMethod.renameProc(methodNameImpl),
+        realProcParams,
+        body = newStmtList(
+          if virtualMethod[3][0].kind == nnkEmpty:
+            realCall
+          else:
+            newAssignment(
+              ident "result",
+              realCall
+            )
+        ),
+        pragmas = virtualMethod[4].copy
       )
       methods.add(realProc)
-      if realProc[3][0].kind == nnkEmpty:
-        realProc[6] = nnkStmtList.newTree(
-          nnkCall.newTree(
-            ident methodNameImplC,
-            nnkCast.newTree(
-              ident classname,
-              ident "s"
-            )
-          )
-        )
-        var params = getAllParamNames(realProc[3])
-        discard params.pop
-        for pid in params:
-          realproc[6][0].add(pid)
-      else:
-        realProc[6] = nnkStmtList.newTree(
-          nnkAsgn.newTree(
-            ident "result",
-            nnkCall.newTree(
-              ident methodNameImplC,
-              nnkCast.newTree(
-                ident classname,
-                ident "s"
-              )
-            )
-          )
-        )
-        var params = getAllParamNames(realProc[3])
-        discard params.pop
-        for pid in params:
-          realproc[6][0][1].add(pid)
   else:
     # no params, or first param has other type
     methods.add(convMethodToProc(virtualMethod))
@@ -322,7 +299,6 @@ proc createCreateMethod(classname: string, createMethod: NimNode = nil): NimNode
     initProc.setLineInfo(createMethod.lineInfoObj)
     result.add(initProc)
   result.add(newProc)
-  echo result.treeRepr
 
 
 proc createInitVTable(classname: string, initlines: NimNode): NimNode {.compiletime.} =
@@ -349,7 +325,7 @@ proc createInitVTable(classname: string, initlines: NimNode): NimNode {.compilet
 
 proc createType(classname: string, basename: string, body: NimNode): (NimNode, NimNode) =
   var reclist = newNimNode(nnkRecList)
-  var methods = newStmtList()
+  var methods: seq[NimNode]
   var initLines = newStmtList()
   var hasDestructor = false
   var constructor: NimNode = nil
@@ -386,7 +362,7 @@ proc createType(classname: string, basename: string, body: NimNode): (NimNode, N
       if procname == "=destroy":
         # Create destructor method
         hasDestructor = true
-        methods.insert(0, createDestroyMethod(classname, elem))
+        methods.insert(createDestroyMethod(classname, elem), 0)
       elif procname == "=new":
         # Create constructor method
         constructor = createCreateMethod(classname, elem)
@@ -475,7 +451,7 @@ proc createType(classname: string, basename: string, body: NimNode): (NimNode, N
     methods.add(createCreateMethod(classname, nil))
   else:
     methods.add(constructor)
-  result = (theType, methods)
+  result = (theType, newStmtList(methods))
 
 
 macro class*(head, body: untyped): untyped =
@@ -492,7 +468,7 @@ macro class*(head, body: untyped): untyped =
   typeNode.setLineInfo(head.lineInfoObj)
   result.add(typeNode)
   result.add(methods)
-  echo result.repr
+  #echo result.repr
 
 
 macro super*(classname, body: untyped): untyped =
