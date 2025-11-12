@@ -482,8 +482,10 @@ macro class*(head, body: untyped): untyped =
   let (classname, basename) = getNameAndBase(head)
   result = newStmtList()
   let cacheItem = TCacheItem(basename: basename)
-  when not defined(nimdoc) and not defined(nimscript):
-    if classCache.hasKey(classname):
+  if classCache.hasKey(classname):
+    when defined(nimsuggest):
+      classCache.del(classname)
+    else:
       error("Duplicate class " & classname, head)
   classCache[classname] = cacheItem
   let (typeNode, methods) = createType(classname, basename, body)
