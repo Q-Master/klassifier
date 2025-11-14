@@ -12,51 +12,71 @@ type
 var classCache {.compiletime, global.}: Table[string, TCacheItem]
 
 
-proc getNameAndBase(head: NimNode): (string, string) {.compiletime.} =
+proc getNameAndBase(head: NimNode): (NimNode, string) {.compiletime.} =
+  ## Parses the head of the class macro and returns class name and
+  ## it's base if set. If not - string will be empty.
+  ## Will preserve the line info of the class name.
+
   var classname: NimNode
   var basename: string
   case head.kind
   of nnkIdent:
-    classname = head
+    classname = head.copy
   of nnkInfix:
     if eqIdent(head[0], "of"):
-      classname = head[1]
+      classname = head[1].copy
       case head[2].kind
       of nnkIdent:
         basename = $head[2]
       else:
         error("Error in class parents", head[2])
     else:
-      classname = head[1]
+      classname = head[1].copy
   else:
-    error("Error in class header", head)
-  result = ($classname, basename)
+    error("Error in class header " & head.treeRepr, head)
+  result = (classname, basename)
 
 
-proc getProcName(element: NimNode): string {.compiletime.} =
-  if element.kind in [nnkProcDef, nnkMethodDef]:
-    let en = element[0]
+proc getProcName(callable: NimNode): (string, LineInfo) {.compiletime.} =
+  ## Returns the proc/method name and coresponding lineinfo.
+
+  if callable.kind in [nnkProcDef, nnkMethodDef]:
+    let en = callable[0]
     case en.kind
     of nnkIdent:
-      result = $en
+      result = ($en, en.lineInfoObj)
     of nnkPostfix:
       if en[1].kind == nnkIdent:
-        result = $en[1]
+        result = ($en[1], en[1].lineInfoObj)
       else:
-        result = $en[1][0] & $en[1][1]
+        result = ($en[1][0] & $en[1][1], en[1].lineInfoObj)
     of nnkAccQuoted:
-      result = $en[0] & $en[1]
+      result = ($en[0] & $en[1], en.lineInfoObj)
     else:
       raise newException(ValueError, "Element is unknown")
   else:
     raise newException(ValueError, "Element is not a function")
 
 
-proc findMethodClass(methodName: string, base: string): string {.compiletime.} =
+proc getAllParamNames(params: NimNode): seq[NimNode] {.compiletime.} =
+  ## Returns all the params of nnkFormalParams of the proc/method
+  ## Will preserve the line info.
+
+  if params.kind == nnkFormalParams:
+    for pd in params.children:
+      if pd.kind == nnkIdentDefs:
+        for i in 0 ..< pd.len-2:
+          result.add(pd[i].copy)
+
+
+proc getMethodClass(methodName: string, base: string): string {.compiletime.} =
+  ## Finds the base class implementation for the method name.
+  ## Returns empty string if not found.
+
   var curBase = base
   while true:
     if classCache.hasKey(curBase):
-      if methodName in classCache[curBase].allVMethods:
+      if methodName.toLower in classCache[curBase].allVMethods:
         result = curBase
         break
       else:
@@ -65,81 +85,73 @@ proc findMethodClass(methodName: string, base: string): string {.compiletime.} =
       break
 
 
-proc genVarNode(field: NimNode): NimNode {.compiletime.} =
-  case field.kind
-  of nnkPostfix:
-    # var field*: type
-    result = nnkPostfix.newTree(
-      ident "*",
-      field[1].copy
-    )
-  of nnkIdent:
-    # var field: type
-    result = field.copy
-  else:
-    error("Unknown var section " & $field.kind, field)
+proc rename(someIdent: NimNode, newName: string): NimNode {.compiletime.} =
+  ## Renames ident to a new name.
+  ## Will preserve the line info.
+
+  let nname = ident newName
+  nname.copyLineInfo(someIdent)
+  result =
+    case someIdent.kind
+    of nnkIdent:
+      nname
+    of nnkPostfix:
+      nnkPostfix.newTree(
+        ident "*",
+        nname
+      )
+    else:
+      raise newException(ValueError, "Unknown method/proc")
 
 
-proc addVarNode(reclist: var NimNode, elem: NimNode) {.compiletime.} =
-  # field = trueElem[0]
-  let trueElem = elem[0]
-  var typeNode: NimNode
+proc convMethodToProc(callable: NimNode, newName: string = ""): NimNode {.compiletime.} =
+  ## Converts the method to proc with possible rename.
+  ## Will preserve the line info.
+
+  result = newProc(
+    (
+      if newName.len > 0:
+        callable[0].rename(newName)
+      else:
+        callable[0].copy
+    ),
+    callable[3].children.toSeq,
+    body = callable[6].copy,
+    pragmas = callable[4].copy
+  )
+  result.copyLineInfo(callable)
+
+
+proc createClassParamNode(letVar: NimNode): NimNode {.compiletime.} =
+  ## Creates class parameter node from var/let node.
+  ## Will preserve the line info
+
+  let trueElem = letVar[0]
   case trueElem[0].kind
   of nnkPostfix, nnkIdent:
     # simple exportable fields
-    let fieldNode = genVarNode(trueElem[0])
-    typeNode = nnkIdentDefs.newTree(
-      fieldNode,
+    result = nnkIdentDefs.newTree(
+      trueElem[0].copy,
       trueElem[1].copy,
       trueElem[2].copy
     )
   of nnkPragmaExpr:
     # added some pragmas
-    let fieldNode = genVarNode(trueElem[0][0])
-    typeNode = nnkIdentDefs.newTree(
-      fieldNode,
+    result = nnkIdentDefs.newTree(
+      trueElem[0][0].copy,
       trueElem[1].copy,
       trueElem[2].copy
     )
   else:
     error("Unknown var section " & $trueElem[0].kind, trueElem[0])
-  typeNode.setLineInfo(elem.lineInfoObj)
-  reclist.add(typeNode)
+  result.copyLineInfo(letVar)
 
 
-proc renameProc(elem: NimNode, newName: string): NimNode {.compiletime.} =
-  result =
-    case elem[0].kind
-    of nnkIdent:
-      ident newName
-    of nnkPostfix:
-      nnkPostfix.newTree(
-        ident "*",
-        ident newName
-      )
-    else:
-      raise newException(ValueError, "Unknown method")
-
-
-proc convMethodToProc(elem: NimNode, newName: string = ""): NimNode {.compiletime.} =
-  result = newProc(
-    (
-      if newName.len > 0:
-        elem.renameProc(newName)
-      else:
-        elem[0].copy
-    ),
-    elem[3].children.toSeq,
-    body = elem[6].copy,
-    pragmas = elem[4].copy
-  )
-
-
-proc createProcVar(name: string, params: NimNode): NimNode {.compiletime.} =
+proc createMethodVTVar(name: NimNode, params: NimNode): NimNode {.compiletime.} =
   result = nnkIdentDefs.newTree(
     nnkPostfix.newTree(
       ident "*",
-      ident name
+      name
     ),
     nnkProcTy.newTree(
       params,
@@ -151,29 +163,29 @@ proc createProcVar(name: string, params: NimNode): NimNode {.compiletime.} =
   )
 
 
-proc getAllParamNames(params: NimNode): seq[NimNode] {.compiletime.} =
-  for pd in params.children:
-    if pd.kind == nnkIdentDefs:
-      for i in 0 ..< pd.len-2:
-        result.add(pd[i])
+proc createProcNodes(virtualMethod: NimNode, classname: string, basename: string, varlist: var NimNode): (seq[NimNode], seq[NimNode]) {.compiletime.} =
+  ## Create proc nodes for method, it's implementation if there's no any
+  ## Create init statement for VT variable for method impl.
+  ## If method has no first param of type `classname` then it's just copied to resulting list untouched
 
-
-proc addProcNode(methods: var seq[NimNode], classname: string, basename: string, virtualMethod: NimNode, varlist: var NimNode): seq[NimNode] {.compiletime.} =
-  let methodName = (if virtualMethod[0].kind == nnkIdent: $virtualMethod[0] else: $virtualMethod[0][1])
-  let methodNameV = methodName & "V"
+  var methods: seq[NimNode]
+  var initList: seq[NimNode]
+  let (methodName, infoObj) = virtualMethod.getProcName()
+  let methodNameV = ident (methodName & "V")
+  methodNameV.setLineInfo(infoObj)
   let methodNameImpl = classname.toLower & methodName & "Impl"
   let methodNameImplC = classname.toLower & methodName & "ImplC"
 
-  if (virtualMethod[3].len != 0) and ($(virtualMethod[3][1][1]) == $classname):
+  if (virtualMethod[3].len > 1) and ($(virtualMethod[3][1][1]) == classname):
     # first param is self
     #   - check all the base classes to have any of the same method names
-    let mc = findMethodClass(methodName, basename)
+    let mc = getMethodClass(methodName, basename)
     #     - if not
-    result.add(
+    initList.add(
       nnkAsgn.newTree(
         nnkDotExpr.newTree(
           ident "self",
-          ident methodNameV
+          methodNameV
         ),
         ident methodNameImpl
       )
@@ -183,9 +195,9 @@ proc addProcNode(methods: var seq[NimNode], classname: string, basename: string,
     var copiedElem: NimNode
 
     if mc.len == 0:
-      classCache[classname].allVMethods.add(methodName)
+      classCache[classname].allVMethods.add(methodName.toLower)
       #       - add proc with original name which calls the virtual method
-      realCall = newCall(nnkDotExpr.newTree(ident "self", ident methodNameV), getAllParamNames(virtualMethod[3]))
+      realCall = newCall(nnkDotExpr.newTree(ident "self", methodNameV), getAllParamNames(virtualMethod[3]))
       realProc = newProc(
         virtualMethod[0].copy,
         virtualMethod[3].children.toSeq,
@@ -206,7 +218,7 @@ proc addProcNode(methods: var seq[NimNode], classname: string, basename: string,
       copiedElem.setLineInfo(virtualMethod.lineInfoObj)
       methods.add(copiedElem)
       #       - add type public variable with **V name and type proc (self: ClassType, ....) {.nimcall.}
-      varlist.add(createProcVar(methodNameV, copiedElem[3].copy))
+      varlist.add(createMethodVTVar(methodNameV, copiedElem[3].copy))
     else:
       #     - otherway
       #       - rename the original method to **ImplC and add it. set the lineInfoObj to it
@@ -220,7 +232,7 @@ proc addProcNode(methods: var seq[NimNode], classname: string, basename: string,
       var realProcParams = virtualMethod[3].children.toSeq
       realProcParams[1] = nnkIdentDefs.newTree(ident "s", ident mc, newEmptyNode())
       realProc = newProc(
-        virtualMethod.renameProc(methodNameImpl),
+        virtualMethod.rename(methodNameImpl),
         realProcParams,
         body = newStmtList(
           if virtualMethod[3][0].kind == nnkEmpty:
@@ -237,25 +249,70 @@ proc addProcNode(methods: var seq[NimNode], classname: string, basename: string,
   else:
     # no params, or first param has other type
     methods.add(convMethodToProc(virtualMethod))
+  result = (methods, initList)
 
 
-proc createDestroyMethod(classname: string, destroyMethod: NimNode): NimNode {.compiletime.}=
-  result = convMethodToProc(destroyMethod)
-  result[3][1][1] = ident classname & "Obj"
-  result.setLineInfo(destroyMethod.lineInfoObj)
+proc createInitVTMethod(classname: NimNode, initlines: seq[NimNode], basename: string = ""): NimNode {.compiletime.} =
+  ## Create method which initializes VT for that particular class
+  ## If class has parent call to parent initVT will be issued.
 
+  var stmts = newStmtList()
+  if basename.len > 0:
+    stmts.add(
+      newCall("initVT",
+        nnkCast.newTree(
+          ident basename,
+          ident "self"
+        )
+      )
+    )
+  stmts.add(initlines)
 
-proc createCreateMethod(classname: string, createMethod: NimNode = nil): NimNode {.compiletime.} =
-  result = nnkStmtList.newTree()
-  let newProc = nnkProcDef.newTree(
+  result = nnkProcDef.newTree(
     nnkPostfix.newTree(
       ident "*",
-      ident "new" & classname
+      ident "initVT"
     ),
     newEmptyNode(),
     newEmptyNode(),
     nnkFormalParams.newTree(
-      ident classname,
+      newEmptyNode(),
+      nnkIdentDefs.newTree(
+        ident "self",
+        classname,
+        newEmptyNode()
+      )
+    ),
+    newEmptyNode(),
+    newEmptyNode(),
+    stmts
+  )
+
+
+proc createDestroyMethod(classname: string, destroyMethod: NimNode): NimNode {.compiletime.}=
+  ## Create `=destroy` proc from method
+  ## For classes with destructor it is created 2 type nodes, so the 1st param type is renamed to `classname`+Obj
+  result = convMethodToProc(destroyMethod)
+  let lineinfo = result[3][1][1].lineInfoObj
+  result[3][1][1] = ident classname & "Obj"
+  result[3][1][1].setLineInfo(lineinfo)
+  result.setLineInfo(destroyMethod.lineInfoObj)
+
+
+proc createCreateMethod(classname: NimNode, createMethod: NimNode = nil): seq[NimNode] {.compiletime.} =
+  ## Create implicitly constructor proc with name new+`classname`
+  ## Additionally if `createMetod` is not empty - create `init` proc with contents of `createMethod`
+
+  var newIdent = ident "new" & $classname
+  let newProc = nnkProcDef.newTree(
+    nnkPostfix.newTree(
+      ident "*",
+      newIdent
+    ),
+    newEmptyNode(),
+    newEmptyNode(),
+    nnkFormalParams.newTree(
+      classname,
     ),
     newEmptyNode(),
     newEmptyNode(),
@@ -265,12 +322,16 @@ proc createCreateMethod(classname: string, createMethod: NimNode = nil): NimNode
     )
   )
   if not createMethod.isNil:
-    let methFormalParams = createMethod[3].copy()
+    let (_, lineinfo) = createMethod.getProcName()
+    var initNode = ident "init"
+    initNode.setLineInfo(lineinfo)
+    newIdent.setLineInfo(lineinfo)
+    var methFormalParams = createMethod[3].copy()
     methFormalParams.del(0, 1)
-    let initProc = nnkProcDef.newTree(
+    var initProc = nnkProcDef.newTree(
       nnkPostfix.newTree(
         ident "*",
-        ident "init"
+        initNode
       ),
       newEmptyNode(),
       newEmptyNode(),
@@ -278,7 +339,7 @@ proc createCreateMethod(classname: string, createMethod: NimNode = nil): NimNode
         newEmptyNode(),
         nnkIdentDefs.newTree(
           ident "self",
-          ident classname,
+          classname,
           newEmptyNode()
         )
       ),
@@ -295,54 +356,22 @@ proc createCreateMethod(classname: string, createMethod: NimNode = nil): NimNode
     params.insert(ident "result", 0)
     let initCall = newCall("init", params)
     newProc[6].add(initCall)
-    newProc.setLineInfo(createMethod.lineInfoObj)
-    initProc.setLineInfo(createMethod.lineInfoObj)
+    initProc.copyLineInfo(createMethod)
     result.add(initProc)
   result.add(newProc)
 
 
-proc createInitVTable(classname: string, initlines: NimNode): NimNode {.compiletime.} =
-  result = nnkProcDef.newTree(
-    nnkPostfix.newTree(
-      ident "*",
-      ident "initVT"
-    ),
-    newEmptyNode(),
-    newEmptyNode(),
-    nnkFormalParams.newTree(
-      newEmptyNode(),
-      nnkIdentDefs.newTree(
-        ident "self",
-        ident classname,
-        newEmptyNode()
-      )
-    ),
-    newEmptyNode(),
-    newEmptyNode(),
-    initlines
-  )
-
-
-proc createType(classname: string, basename: string, body: NimNode): (NimNode, NimNode) =
+proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNode], seq[NimNode]) =
   var reclist = newNimNode(nnkRecList)
-  var methods: seq[NimNode]
-  var initLines = newStmtList()
+  var methods: seq[NimNode] = @[]
+  var initLines: seq[NimNode] = @[]
   var hasDestructor = false
-  var constructor: NimNode = nil
-  if basename.len > 0:
-    initLines.add(
-      newCall("initVT",
-        nnkCast.newTree(
-          ident basename,
-          ident "self"
-        )
-      )
-    )
+  var constructor: seq[NimNode]
   for elem in body.children:
     case elem.kind
     of nnkVarSection, nnkLetSection:
       # Variable definition
-      reclist.addVarNode(elem)
+      reclist.add(elem.createClassParamNode)
     of nnkMethodDef:
       ## Virtual method
       ## - check if first param is of self type or any base type
@@ -358,23 +387,24 @@ proc createType(classname: string, basename: string, body: NimNode): (NimNode, N
       ##   - add line to init method which sets **V variable to **Impl method
       ## - otherway
       ##   - just make a proc from the method and put it to statement list
-      let procname = elem.getProcName()
+      let (procname, _) = elem.getProcName()
       if procname == "=destroy":
         # Create destructor method
         hasDestructor = true
-        methods.insert(createDestroyMethod(classname, elem), 0)
+        methods.insert(createDestroyMethod($classname, elem), 0)
       elif procname == "=new":
         # Create constructor method
         constructor = createCreateMethod(classname, elem)
       else:
-        let il = addProcNode(methods, classname, basename, elem, reclist)
+        let (pn, il) = elem.createProcNodes($classname, basename, reclist)
+        if pn.len > 0:
+          methods.add(pn)
         if il.len > 0:
-          for ill in il:
-            initLines.add(ill)
+          initLines.add(il)
     of nnkProcDef:
       ## Non-virtual method
       ## - just add the proc to the statement list and set lineInfoObj to it
-      let procname = elem.getProcName()
+      let (procname, _) = elem.getProcName()
       if procname == "=destroy":
         error "Destructor must be marked as method"
       elif procname == "=new":
@@ -386,16 +416,15 @@ proc createType(classname: string, basename: string, body: NimNode): (NimNode, N
     else:
       discard
 
-  ## For destructorless classes just create ref object
-  ## For classes with destructor, create class object and a class ref object
-  var theType: NimNode = nnkTypeSection.newTree()
+  var theType: seq[NimNode] = @[]
   if hasDestructor:
-    let cobj = (classname & "Obj").ident
+    # For classes with destructor, create class object and a class ref object
+    let cobj = ($classname & "Obj").ident
     theType.add(
       nnkTypeDef.newTree(
         nnkPostfix.newTree(
           ident "*",
-          ident classname
+          classname
         ),
         newEmptyNode(),
         nnkRefTy.newTree(
@@ -422,11 +451,12 @@ proc createType(classname: string, basename: string, body: NimNode): (NimNode, N
       )
     )
   else:
+    # For destructorless classes just create ref object
     theType.add(
       nnkTypeDef.newTree(
         nnkPostfix.newTree(
           ident "*",
-          ident classname
+          classname
         ),
         newEmptyNode(),
         nnkRefTy.newTree(
@@ -446,31 +476,31 @@ proc createType(classname: string, basename: string, body: NimNode): (NimNode, N
     initLines.add(
       nnkDiscardStmt.newTree(newEmptyNode())
     )
-  methods.add(createInitVTable(classname, initLines))
-  if constructor.isNil:
-    methods.add(createCreateMethod(classname, nil))
-  else:
+  methods.add(createInitVTMethod(classname, initLines))
+  if constructor.len > 0:
     methods.add(constructor)
-  result = (theType, newStmtList(methods))
+  else:
+    methods.add(createCreateMethod(classname, nil))
+  result = (theType, methods)
 
 
 macro class*(head, body: untyped): untyped =
   let (classname, basename) = getNameAndBase(head)
   result = newStmtList()
-  let cacheItem = TCacheItem(basename: basename)
-  if classCache.hasKey(classname):
+  if classCache.hasKey($classname):
     when defined(nimsuggest):
-      classCache.del(classname)
+      classCache.del($classname)
     else:
-      error("Duplicate class " & classname, head)
-  classCache[classname] = cacheItem
-  let (typeNode, methods) = createType(classname, basename, body)
-  typeNode.setLineInfo(head.lineInfoObj)
-  result.add(typeNode)
-  result.add(methods)
-  #echo result.repr
+      error("Duplicate class " & $classname, head)
+  classCache[$classname] = TCacheItem(basename: basename)
+  var (typeNodes, methods) = createType(classname, basename, body)
+  var ts = newNimNode(nnkTypeSection, body).add(typeNodes)
+  result.add(ts)
+  result.add(newStmtList(methods))
+  echo result.repr
 
 
+#[
 macro super*(classname, body: untyped): untyped =
   if classname.kind notIn [nnkIdent, nnkSym]:
     error "Class name should be a valid name"
@@ -510,3 +540,4 @@ macro super*(classname, body: untyped): untyped =
       result = body.copy()
   else:
     error "Unknown super class for " & cn
+]#
