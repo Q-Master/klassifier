@@ -101,7 +101,7 @@ proc rename(someIdent: NimNode, newName: string): NimNode {.compiletime.} =
         nname
       )
     else:
-      raise newException(ValueError, "Unknown method/proc")
+      raise newException(ValueError, "Unknown method/proc " & $someIdent)
 
 
 proc convMethodToProc(callable: NimNode, newName: string = ""): NimNode {.compiletime.} =
@@ -232,7 +232,7 @@ proc createProcNodes(virtualMethod: NimNode, classname: string, basename: string
       var realProcParams = virtualMethod[3].children.toSeq
       realProcParams[1] = nnkIdentDefs.newTree(ident "s", ident mc, newEmptyNode())
       realProc = newProc(
-        virtualMethod.rename(methodNameImpl),
+        virtualMethod[0].rename(methodNameImpl),
         realProcParams,
         body = newStmtList(
           if virtualMethod[3][0].kind == nnkEmpty:
@@ -362,6 +362,10 @@ proc createCreateMethod(classname: NimNode, createMethod: NimNode = nil): seq[Ni
 
 
 proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNode], seq[NimNode]) =
+  ## Iterate through the class body and create all the procs, methods, variables.
+  ## Create init methods and constructor/destructor.
+  ## Create all init code.
+
   var reclist = newNimNode(nnkRecList)
   var methods: seq[NimNode] = @[]
   var initLines: seq[NimNode] = @[]
@@ -497,47 +501,46 @@ macro class*(head, body: untyped): untyped =
   var ts = newNimNode(nnkTypeSection, body).add(typeNodes)
   result.add(ts)
   result.add(newStmtList(methods))
-  echo result.repr
+  #echo result.repr
 
 
-#[
-macro super*(classname, body: untyped): untyped =
-  if classname.kind notIn [nnkIdent, nnkSym]:
-    error "Class name should be a valid name"
-  let cn = $classname
-  if body.kind != nnkCall:
-    error "Only callable could be used in a super"
-  if classCache.hasKey(cn) and classCache[cn].basename != "":
-    let fn: string = (
-      if body[0].kind == nnkIdent:
-        $body[0]
-      elif body[0].kind == nnkDotExpr:
-        $body[0][1]
-      else:
-        error "Unknown call"
-    )
-    let mc = findMethodClass(fn, classCache[cn].basename)
-    if mc.len > 0:
-      var allparams: seq[NimNode]
-      for param in body:
-        allparams.add(param)
-      if body[0].kind == nnkIdent:
-        allparams[0] = ident mc.toLower() & fn & "Impl"
-        allparams[1] = nnkCast.newTree(
+macro super*(self: typed, body: untyped): untyped =
+  let className = ($self.getType[1]).split(":")[0]
+  if classCache.hasKey(className):
+    let bn = classCache[className].basename
+    if bn != "":
+      let fn = (
+        if body[0].kind == nnkIdent:
+          $body[0]
+        elif body[0].kind == nnkDotExpr:
+          $body[0][1]
+        else:
+          error "Unknown call"
+      )
+      let mc = getMethodClass(fn, bn)
+      if mc.len > 0:
+        var allparams: seq[NimNode]
+        for param in body:
+          allparams.add(param)
+        let castStmt = nnkCast.newTree(
           ident mc,
-          allparams[1].copy
+          self.copy
         )
+        if body[0].kind == nnkIdent:
+          allparams[0] = ident mc.toLower() & fn & "Impl"
+          allparams[0].setLineInfo(body[0].lineInfoObj)
+          if allparams.len > 1:
+            allparams[1] = castStmt
+          else:
+            allparams.add(castStmt)
+        else:
+          allparams[0][0] = castStmt
+          allparams[0][1] = ident mc.toLower() & fn & "Impl"
+          allparams[0][1].setLineInfo(body[0][1].lineInfoObj)
+        result = nnkCall.newTree(allparams)
       else:
-        allparams[0][0] = nnkCast.newTree(
-          ident mc,
-          allparams[0][0].copy
-        )
-        allparams[0][1] = ident mc.toLower() & fn & "Impl"
-      result = nnkCall.newTree()
-      for param in allparams:
-        result.add(param)
+        result = body.copy()
     else:
-      result = body.copy()
+      error "Unknown super class for " & className
   else:
-    error "Unknown super class for " & cn
-]#
+    error "Unknown super class for " & className
