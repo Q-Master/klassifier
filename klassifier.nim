@@ -10,6 +10,7 @@ type
 
 
 var classCache {.compiletime, global.}: Table[string, TCacheItem]
+var mapCache {.compiletime, global.}: Table[string, string]
 
 
 proc getNameAndBase(head: NimNode): (NimNode, string) {.compiletime.} =
@@ -424,6 +425,8 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
   if hasDestructor:
     # For classes with destructor, create class object and a class ref object
     let cobj = ($classname & "Obj").ident
+    cobj.setLineInfo(classname.lineInfoObj)
+    mapCache[$cobj] = $classname
     theType.add(
       nnkTypeDef.newTree(
         nnkPostfix.newTree(
@@ -505,7 +508,9 @@ macro class*(head, body: untyped): untyped =
 
 
 macro super*(self: typed, body: untyped): untyped =
-  let className = ($self.getType[1]).split(":")[0]
+  var className = ($self.getType[1]).split(":")[0]
+  if mapCache.hasKey(className):
+    className = mapCache[className]
   if classCache.hasKey(className):
     let bn = classCache[className].basename
     if bn != "":
