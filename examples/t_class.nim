@@ -29,7 +29,7 @@ class TClass1 of TClass:
 
 
 proc x(self: TClass1) =
-  TClass1.super tMethod(self)
+  self.super tMethod()
 
 let cls = newTClass1()
 

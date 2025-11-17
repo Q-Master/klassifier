@@ -508,7 +508,14 @@ macro class*(head, body: untyped): untyped =
 
 
 macro super*(self: typed, body: untyped): untyped =
-  var className = ($self.getType[1]).split(":")[0]
+  var className: string
+  var typCast = false
+  let typ = self.getType[1]
+  if typ.kind == nnkBracketExpr:
+    className = ($typ[1]).split(":")[0]
+    typCast = true
+  else:
+    className = ($typ).split(":")[0]
   if mapCache.hasKey(className):
     className = mapCache[className]
   if classCache.hasKey(className):
@@ -527,9 +534,18 @@ macro super*(self: typed, body: untyped): untyped =
         var allparams: seq[NimNode]
         for param in body:
           allparams.add(param)
+        var castParam: NimNode = (
+          if typCast:
+            if body[0].kind == nnkIdent:
+              allparams[1].copy
+            else:
+              allparams[0][0].copy
+          else:
+            self.copy
+        )
         let castStmt = nnkCast.newTree(
           ident mc,
-          self.copy
+          castParam
         )
         if body[0].kind == nnkIdent:
           allparams[0] = ident mc.toLower() & fn & "Impl"
