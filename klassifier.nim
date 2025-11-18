@@ -148,14 +148,30 @@ proc createClassParamNode(letVar: NimNode): NimNode {.compiletime.} =
   result.copyLineInfo(letVar)
 
 
-proc createMethodVTVar(name: NimNode, params: NimNode): NimNode {.compiletime.} =
+proc createMethodVTVar(name: NimNode, params: NimNode, pragmas: NimNode): NimNode {.compiletime.} =
+  var retypelit: string
+  var mparams = params
+  if not pragmas.isNil and pragmas.kind != nnkEmpty:
+    for pragma in pragmas:
+      if pragma.kind == nnkExprColonExpr and $pragma[0] == "retype":
+        retypelit = $pragma[1]
+        break
+    if retypelit.len > 0:
+      let retypelist = retypelit.split(";")
+      var retypedict: Table[string, string]
+      for rl in retypelist:
+        let kv = rl.split(":")
+        retypedict[kv[0]] = kv[1]
+      for i in 0 ..< mparams.len:
+        if mparams[i].kind == nnkIdentDefs and retypedict.hasKey($mparams[i][0]):
+          mparams[i][1] = parseExpr(retypedict[$mparams[i][0]])
   result = nnkIdentDefs.newTree(
     nnkPostfix.newTree(
       ident "*",
       name
     ),
     nnkProcTy.newTree(
-      params,
+      mparams,
       nnkPragma.newTree(
         ident "nimcall"
       )
@@ -219,7 +235,7 @@ proc createProcNodes(virtualMethod: NimNode, classname: string, basename: string
       copiedElem.setLineInfo(virtualMethod.lineInfoObj)
       methods.add(copiedElem)
       #       - add type public variable with **V name and type proc (self: ClassType, ....) {.nimcall.}
-      varlist.add(createMethodVTVar(methodNameV, copiedElem[3].copy))
+      varlist.add(createMethodVTVar(methodNameV, copiedElem[3].copy, copiedElem[4]))
     else:
       #     - otherway
       #       - rename the original method to **ImplC and add it. set the lineInfoObj to it
@@ -491,7 +507,13 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
   result = (theType, methods)
 
 
+template retype*(rules: string) {.pragma.} ## Retype some args to remove sum types in format paramname:paramtype;param1name:param1type...
+
+
 macro class*(head, body: untyped): untyped =
+  ## Creates class emulator
+  ## Emulator includes self VT, methods, procs and vars.
+
   let (classname, basename) = getNameAndBase(head)
   result = newStmtList()
   if classCache.hasKey($classname):
@@ -508,6 +530,8 @@ macro class*(head, body: untyped): untyped =
 
 
 macro super*(self: typed, body: untyped): untyped =
+  ## Simplifies calling the parent class methods
+
   var className: string
   var typCast = false
   let typ = self.getType[1]
