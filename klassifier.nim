@@ -310,9 +310,16 @@ proc createDestroyMethod(classname: string, destroyMethod: NimNode): NimNode {.c
   ## Create `=destroy` proc from method
   ## For classes with destructor it is created 2 type nodes, so the 1st param type is renamed to `classname`+Obj
   result = convMethodToProc(destroyMethod)
-  let lineinfo = result[3][1][1].lineInfoObj
-  result[3][1][1] = ident classname & "Obj"
-  result[3][1][1].setLineInfo(lineinfo)
+  result[3] = nnkFormalParams.newTree(
+    newEmptyNode(),
+    nnkIdentDefs.newTree(
+      ident "self",
+      nnkVarTy.newTree(
+        ident classname & "Obj"
+      ),
+      newEmptyNode()
+    )
+  )
   result.setLineInfo(destroyMethod.lineInfoObj)
 
 
@@ -378,7 +385,7 @@ proc createCreateMethod(classname: NimNode, createMethod: NimNode = nil): seq[Ni
   result.add(newProc)
 
 
-proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNode], seq[NimNode]) =
+proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNode], seq[NimNode]) {.compiletime.} =
   ## Iterate through the class body and create all the procs, methods, variables.
   ## Create init methods and constructor/destructor.
   ## Create all init code.
@@ -411,11 +418,14 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
       let (procname, _) = elem.getProcName()
       if procname == "=destroy":
         # Create destructor method
+        if hasDestructor:
+          {.line: instantiationInfo().}:
+            error "Destructor might be only one"
         hasDestructor = true
         methods.insert(createDestroyMethod($classname, elem), 0)
       elif procname == "=new":
         # Create constructor method
-        constructor = createCreateMethod(classname, elem)
+        constructor.add(createCreateMethod(classname, elem))
       else:
         let (pn, il) = elem.createProcNodes($classname, basename, reclist)
         if pn.len > 0:
@@ -427,9 +437,11 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
       ## - just add the proc to the statement list and set lineInfoObj to it
       let (procname, _) = elem.getProcName()
       if procname == "=destroy":
-        error "Destructor must be marked as method"
+        {.line: instantiationInfo().}:
+          error "Destructor must be marked as method"
       elif procname == "=new":
-        error "Constructor must be marked as method"
+        {.line: instantiationInfo().}:
+          error "Constructor must be marked as method"
       else:
         let ec = elem.copy()
         ec.setLineInfo(elem.lineInfoObj)
@@ -589,3 +601,4 @@ macro super*(self: typed, body: untyped): untyped =
       error "Unknown super class for " & className
   else:
     error "Unknown super class for " & className
+  #echo result.repr
