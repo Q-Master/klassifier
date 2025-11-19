@@ -54,9 +54,9 @@ proc getProcName(callable: NimNode): (string, LineInfo) {.compiletime.} =
     of nnkAccQuoted:
       result = ($en[0] & $en[1], en.lineInfoObj)
     else:
-      raise newException(ValueError, "Element is unknown")
+      error("Element is unknown", en)
   else:
-    raise newException(ValueError, "Element is not a function")
+    error("Element is not a function", callable)
 
 
 proc getAllParamNames(params: NimNode): seq[NimNode] {.compiletime.} =
@@ -102,7 +102,7 @@ proc rename(someIdent: NimNode, newName: string): NimNode {.compiletime.} =
         nname
       )
     else:
-      raise newException(ValueError, "Unknown method/proc " & $someIdent)
+      error("Unknown method/proc " & $someIdent, someIdent)
 
 
 proc convMethodToProc(callable: NimNode, newName: string = ""): NimNode {.compiletime.} =
@@ -347,6 +347,8 @@ proc createCreateMethod(classname: NimNode, createMethod: NimNode = nil): seq[Ni
   )
   if not createMethod.isNil:
     let (_, lineinfo) = createMethod.getProcName()
+    if "init" notIn classCache[$classname].allVMethods:
+      classCache[$classname].allVMethods.add("init")
     var initNode = ident "init"
     initNode.setLineInfo(lineinfo)
     newIdent.setLineInfo(lineinfo)
@@ -395,6 +397,14 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
   var initLines: seq[NimNode] = @[]
   var hasDestructor = false
   var constructor: seq[NimNode]
+
+  if classCache.hasKey($classname):
+    when defined(nimsuggest):
+      classCache.del($classname)
+    else:
+      error("Duplicate class " & $classname, classname)
+  classCache[$classname] = TCacheItem(basename: basename)
+
   for elem in body.children:
     case elem.kind
     of nnkVarSection, nnkLetSection:
@@ -419,8 +429,7 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
       if procname == "=destroy":
         # Create destructor method
         if hasDestructor:
-          {.line: instantiationInfo().}:
-            error "Destructor might be only one"
+          error("Destructor might be only one", elem)
         hasDestructor = true
         methods.insert(createDestroyMethod($classname, elem), 0)
       elif procname == "=new":
@@ -437,11 +446,9 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
       ## - just add the proc to the statement list and set lineInfoObj to it
       let (procname, _) = elem.getProcName()
       if procname == "=destroy":
-        {.line: instantiationInfo().}:
-          error "Destructor must be marked as method"
+        error("Destructor must be marked as method", elem)
       elif procname == "=new":
-        {.line: instantiationInfo().}:
-          error "Constructor must be marked as method"
+        error("Constructor must be marked as method", elem)
       else:
         let ec = elem.copy()
         ec.setLineInfo(elem.lineInfoObj)
@@ -528,12 +535,6 @@ macro class*(head, body: untyped): untyped =
 
   let (classname, basename) = getNameAndBase(head)
   result = newStmtList()
-  if classCache.hasKey($classname):
-    when defined(nimsuggest):
-      classCache.del($classname)
-    else:
-      error("Duplicate class " & $classname, head)
-  classCache[$classname] = TCacheItem(basename: basename)
   var (typeNodes, methods) = createType(classname, basename, body)
   var ts = newNimNode(nnkTypeSection, body).add(typeNodes)
   result.add(ts)
@@ -557,48 +558,48 @@ macro super*(self: typed, body: untyped): untyped =
   if classCache.hasKey(className):
     let bn = classCache[className].basename
     if bn != "":
-      let fn = (
+      let (fn, supername, isDotExpr) = (
         if body[0].kind == nnkIdent:
-          $body[0]
+          (body[0], if typCast: body[1] else: self, false)
         elif body[0].kind == nnkDotExpr:
-          $body[0][1]
+          (body[0][1], body[0][0], true)
         else:
-          error "Unknown call"
+          error("Unknown call", body[0])
       )
-      let mc = getMethodClass(fn, bn)
+      let mc = getMethodClass($fn, bn)
       if mc.len > 0:
+        let callee = (
+          if $fn == "init":
+            fn
+          else:
+            ident mc.toLower() & $fn & "Impl"
+        )
+        callee.setLineInfo(fn.lineInfoObj)
+        let castStmt = nnkCast.newTree(
+          ident mc,
+          supername.copy
+        )
         var allparams: seq[NimNode]
         for param in body:
           allparams.add(param)
-        var castParam: NimNode = (
-          if typCast:
-            if body[0].kind == nnkIdent:
-              allparams[1].copy
-            else:
-              allparams[0][0].copy
-          else:
-            self.copy
-        )
-        let castStmt = nnkCast.newTree(
-          ident mc,
-          castParam
-        )
-        if body[0].kind == nnkIdent:
-          allparams[0] = ident mc.toLower() & fn & "Impl"
-          allparams[0].setLineInfo(body[0].lineInfoObj)
-          if allparams.len > 1:
-            allparams[1] = castStmt
-          else:
-            allparams.add(castStmt)
-        else:
+
+        if isDotExpr:
           allparams[0][0] = castStmt
-          allparams[0][1] = ident mc.toLower() & fn & "Impl"
-          allparams[0][1].setLineInfo(body[0][1].lineInfoObj)
+          allparams[0][1] = callee
+        else:
+          allparams[0] = callee
+          if typCast:
+            if allparams.len > 1:
+              allparams[1] = castStmt
+            else:
+              allparams.add(castStmt)
+          else:
+            allparams.insert(castStmt, 1)
         result = nnkCall.newTree(allparams)
       else:
         result = body.copy()
     else:
-      error "Unknown super class for " & className
+      error("Unknown super class for " & className, self)
   else:
-    error "Unknown super class for " & className
+    error("Unknown super class for " & className, self)
   #echo result.repr
