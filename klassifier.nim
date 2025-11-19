@@ -499,7 +499,7 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
     initLines.add(
       nnkDiscardStmt.newTree(newEmptyNode())
     )
-  methods.add(createInitVTMethod(classname, initLines))
+  methods.add(createInitVTMethod(classname, initLines, basename))
   if constructor.len > 0:
     methods.add(constructor)
   else:
