@@ -274,7 +274,7 @@ proc createInitVTMethod(classname: NimNode, initlines: seq[NimNode], basename: s
   ## If class has parent call to parent initVT will be issued.
 
   var stmts = newStmtList()
-  if basename.len > 0:
+  if basename.len > 0 and classCache.hasKey(basename):
     stmts.add(
       newCall("initVT",
         nnkCast.newTree(
@@ -395,7 +395,7 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
   var reclist = newNimNode(nnkRecList)
   var methods: seq[NimNode] = @[]
   var initLines: seq[NimNode] = @[]
-  var hasDestructor = false
+  var destructor: NimNode = nil
   var constructor: seq[NimNode]
 
   if classCache.hasKey($classname):
@@ -428,10 +428,9 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
       let (procname, _) = elem.getProcName()
       if procname == "=destroy":
         # Create destructor method
-        if hasDestructor:
+        if not destructor.isNil:
           error("Destructor might be only one", elem)
-        hasDestructor = true
-        methods.insert(createDestroyMethod($classname, elem), 0)
+        destructor = createDestroyMethod($classname, elem)
       elif procname == "=new":
         # Create constructor method
         constructor.add(createCreateMethod(classname, elem))
@@ -457,7 +456,29 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
       discard
 
   var theType: seq[NimNode] = @[]
-  if hasDestructor:
+  if destructor.isNil:
+    # For destructorless classes just create ref object
+    theType.add(
+      nnkTypeDef.newTree(
+        nnkPostfix.newTree(
+          ident "*",
+          classname
+        ),
+        newEmptyNode(),
+        nnkRefTy.newTree(
+          nnkObjectTy.newTree(
+            newEmptyNode(),
+            (
+              nnkOfInherit.newTree(
+                (if basename.len > 0: basename.ident else: ident "RootObj")
+              )
+            ),
+            reclist
+          )
+        )
+      )
+    )
+  else:
     # For classes with destructor, create class object and a class ref object
     let cobj = ($classname & "Obj").ident
     cobj.setLineInfo(classname.lineInfoObj)
@@ -492,28 +513,6 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
         )
       )
     )
-  else:
-    # For destructorless classes just create ref object
-    theType.add(
-      nnkTypeDef.newTree(
-        nnkPostfix.newTree(
-          ident "*",
-          classname
-        ),
-        newEmptyNode(),
-        nnkRefTy.newTree(
-          nnkObjectTy.newTree(
-            newEmptyNode(),
-            (
-              nnkOfInherit.newTree(
-                (if basename.len > 0: basename.ident else: ident "RootObj")
-              )
-            ),
-            reclist
-          )
-        )
-      )
-    )
   if initLines.len == 0:
     initLines.add(
       nnkDiscardStmt.newTree(newEmptyNode())
@@ -523,6 +522,8 @@ proc createType(classname: NimNode, basename: string, body: NimNode): (seq[NimNo
     methods.add(constructor)
   else:
     methods.add(createCreateMethod(classname, nil))
+  if not destructor.isNil:
+    methods.insert(destructor, 0)
   result = (theType, methods)
 
 
